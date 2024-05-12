@@ -6,11 +6,13 @@
 #define OFF 0xFF9867
 #define ON 0xFF02FD
 
-const int LOOP_TIME = 1000;
+const int LOOP_TIME = 200;
 
 // weights
-const int HX711_dout = 6;
+const int HX711_dout = 3;
 const int HX711_sck = 5;
+const int IR_dat = 9;
+
 HX711_ADC LoadCell(HX711_dout, HX711_sck);
 volatile boolean newDataReady;
 void dataReadyISR() {
@@ -18,10 +20,10 @@ void dataReadyISR() {
     newDataReady = 1;
   }
 }
-const float WEIGHT_THRESHOLD = 30.0;
+const float WEIGHT_THRESHOLD = 1000.0;
 
 // lamp
-IRsend irsend(3);
+IRsend irsend(IR_dat);
 const int PARTITION[] = {
   8000,
   800,
@@ -34,12 +36,19 @@ const int PARTITION[] = {
   100,
   80,
   150,
+  150,
 };
 const size_t PARTITION_SIZE = (sizeof(PARTITION) / sizeof(PARTITION[0]));
-void set_IR(size_t value) {
-  Serial.print("-LAMP:");
-  Serial.println(value);
-  irsend.sendNEC(0xFFA857, 32);
+void set_IR(boolean on, int rep=2) {
+  if(on) {
+    Serial.println("lamp on");
+    for(size_t i(0); i<rep; ++i)
+      irsend.sendNEC(ON, 32);
+  } else {
+    Serial.println("lamp off");
+    for(size_t i(0); i<rep; ++i)
+      irsend.sendNEC(OFF, 32);
+  }
 }
 
 void setup() {
@@ -64,7 +73,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(HX711_dout), dataReadyISR, FALLING);
 
   // lamp
-  set_IR(ON);
+  set_IR(false);
   delay(2000);
 
   Serial.println("Startup is complete");
@@ -78,13 +87,15 @@ boolean someoneIsSitting = false;
 
 void initialize_state() {
   Serial.println(">Nobody is sitting");
-  set_IR(OFF);
+  set_IR(false, 3);
   wait_for = 0;
   partition_pointer = 0;
   flicker_pointer = 0;
 }
 
 void loop() {
+  const boolean someoneWasSitting = someoneIsSitting;
+
   if (newDataReady) {
     newDataReady = 0;
     const float weight = LoadCell.getData();
@@ -92,7 +103,9 @@ void loop() {
   }
   
   if (!someoneIsSitting) {
-    initialize_state();
+    if (someoneWasSitting) {
+      initialize_state();
+    }
     delay(LOOP_TIME);
     return;
   }
@@ -107,8 +120,7 @@ void loop() {
   if(partition_pointer < PARTITION_SIZE) {
     Serial.print(">Partition: ");
     Serial.println(partition_pointer);
-    const boolean on = partition_pointer%2 == 0;
-    set_IR(on ? ON: OFF);
+    set_IR(partition_pointer%2 == 0);
     wait_for = PARTITION[partition_pointer];
     ++partition_pointer;
     return;
@@ -136,7 +148,7 @@ void loop() {
   Serial.println(flicker_pointer);
   const boolean on = flicker_pointer % 2 == 0;
   --flicker_pointer;
-  set_IR(on ? ON: OFF);
+  set_IR(on);
   switch(flicker_intensity) {
     case 0:
       wait_for = on ? random(1000, 6000): random(500, 1000);
