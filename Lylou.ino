@@ -1,109 +1,119 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
 #include <HX711_ADC.h>
-
-#include <IRremote.hpp>
-
-#define TOGGLE 0xFFA857
-#define OFF 0xFF9867
-#define ON 0xFF02FD
 
 const int LOOP_TIME = 200;
 
-// weights
-const int HX711_dout = 3;
-const int HX711_sck = 5;
-const int IR_dat = 9;
+const int STANDBY_INTENSITY = 20;
+const char* SSID = "ShellyVintage-6F6A99";
+const char* PASSWORD = "";
+const String SERVER_NAME = "http://192.168.33.1/light/";
 
+const int HX711_dout = 5;
+const int HX711_sck = 6;
+const float WEIGHT_THRESHOLD = 800.0;
+const int PARTITION[] = {
+  8000, 800, 600, 500, 400, 150, 100, 160, 100, 80, 150, 150
+};
+
+// Lamp
+const size_t PARTITION_SIZE = (sizeof(PARTITION) / sizeof(PARTITION[0]));
+HTTPClient http;
+
+void connect_to_bulb() {
+  Serial.println("Connecting to lamp");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to WiFi network with IP Address: ");
+  Serial.println(WiFi.localIP());
+  http.setTimeout(100);
+}
+
+void set_bulb_intensity(int intensity) {
+  if(WiFi.status() != WL_CONNECTED){
+    Serial.println("WiFi Disconnected");
+    connect_to_bulb();
+  }
+  const String server_path = SERVER_NAME + "0?turn=on&brightness=" + String(intensity);
+  http.begin(server_path.c_str());
+  int response_code = http.GET();
+  if (response_code>0) {
+    Serial.print("HTTP Response code: ");
+    Serial.println(response_code);
+    String payload = http.getString();
+    Serial.println(payload);
+  }
+  else {
+    Serial.print("Error code: ");
+    Serial.println(response_code);
+  }
+  http.end();
+}
+
+// Weight sensors
 HX711_ADC LoadCell(HX711_dout, HX711_sck);
-volatile boolean newDataReady;
+volatile boolean new_weight_data;
 void dataReadyISR() {
   if (LoadCell.update()) {
-    newDataReady = 1;
-  }
-}
-const float WEIGHT_THRESHOLD = 1000.0;
-
-// lamp
-IRsend irsend(IR_dat);
-const int PARTITION[] = {
-  8000,
-  800,
-  600,
-  500,
-  400,
-  150,
-  100,
-  160,
-  100,
-  80,
-  150,
-  150,
-};
-const size_t PARTITION_SIZE = (sizeof(PARTITION) / sizeof(PARTITION[0]));
-void set_IR(boolean on, int rep=2) {
-  if(on) {
-    Serial.println("lamp on");
-    for(size_t i(0); i<rep; ++i)
-      irsend.sendNEC(ON, 32);
-  } else {
-    Serial.println("lamp off");
-    for(size_t i(0); i<rep; ++i)
-      irsend.sendNEC(OFF, 32);
+    new_weight_data = 1;
   }
 }
 
-void setup() {
-  Serial.begin(57600); delay(10);
-  Serial.println();
-  Serial.println("Starting...");
-
-  // weights
+void init_weight_sensors() {
   LoadCell.begin();
-  unsigned long stabilizingtime = 2000;
-  boolean _tare = true;
-  LoadCell.start(stabilizingtime, _tare);
+  LoadCell.start(2000, true);
   if (LoadCell.getTareTimeoutFlag()) {
     Serial.println("Timeout, check MCU>HX711 wiring and pin designations");
     while (1);
   }
   else {
-    float calibrationValue = 696.0;
-    LoadCell.setCalFactor(calibrationValue);
+    LoadCell.setCalFactor(696.0);
     Serial.println("Weights ready");
   }
   attachInterrupt(digitalPinToInterrupt(HX711_dout), dataReadyISR, FALLING);
-
-  // lamp
-  set_IR(false);
-  delay(2000);
-
-  Serial.println("Startup is complete");
 }
 
-int partition_pointer = 0;
-int wait_for = 0;
-int flicker_pointer = 0;
-int flicker_intensity = 0;
-boolean someoneIsSitting = false;
+int partition_pointer, wait_for, flicker_pointer, flicker_intensity;
+boolean someone_is_sitting = false;
 
 void initialize_state() {
   Serial.println(">Nobody is sitting");
-  set_IR(false, 3);
+  set_bulb_intensity(STANDBY_INTENSITY);
   wait_for = 0;
   partition_pointer = 0;
   flicker_pointer = 0;
+  flicker_intensity = 0;
+}
+
+void setup() {
+  Serial.begin(115200); 
+  delay(10);
+  Serial.println();
+  Serial.println("Starting...");
+
+  init_weight_sensors();
+  WiFi.begin(SSID, PASSWORD);
+  connect_to_bulb();
+  initialize_state();
+
+  delay(1000);
+  Serial.println("Startup is complete");
 }
 
 void loop() {
-  const boolean someoneWasSitting = someoneIsSitting;
+  const boolean someone_was_sitting = someone_is_sitting;
 
-  if (newDataReady) {
-    newDataReady = 0;
+  if (new_weight_data) {
+    new_weight_data = 0;
     const float weight = LoadCell.getData();
-    someoneIsSitting = weight > WEIGHT_THRESHOLD;
+    someone_is_sitting = weight > WEIGHT_THRESHOLD;
   }
   
-  if (!someoneIsSitting) {
-    if (someoneWasSitting) {
+  if (!someone_is_sitting) {
+    if (someone_was_sitting) {
       initialize_state();
     }
     delay(LOOP_TIME);
@@ -120,7 +130,8 @@ void loop() {
   if(partition_pointer < PARTITION_SIZE) {
     Serial.print(">Partition: ");
     Serial.println(partition_pointer);
-    set_IR(partition_pointer%2 == 0);
+    const boolean on = partition_pointer % 2 == 0;
+    set_bulb_intensity(on ? 100: 0);
     wait_for = PARTITION[partition_pointer];
     ++partition_pointer;
     return;
@@ -148,7 +159,7 @@ void loop() {
   Serial.println(flicker_pointer);
   const boolean on = flicker_pointer % 2 == 0;
   --flicker_pointer;
-  set_IR(on);
+  set_bulb_intensity(on ? 100: 0);
   switch(flicker_intensity) {
     case 0:
       wait_for = on ? random(1000, 6000): random(500, 1000);
